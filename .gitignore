@@ -1,0 +1,18 @@
+# Compiled class files
+*.class
+
+# Log file
+*.log
+
+# Encrypted test/output files
+*.enc
+EncryptedFiles/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE specific files
+.idea/
+.vscode/
+*.iml
