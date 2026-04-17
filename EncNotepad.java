@@ -5,6 +5,7 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
 import java.nio.file.Files;
+import java.util.Arrays;
 
 /**
  * EncNotepad - A simple, clean, and premium-feel notepad application using Java Swing.
@@ -151,14 +152,20 @@ public class EncNotepad extends JFrame {
 
         File file = FileHandler.openFile(this);
         if (file != null) {
+            char[] password = promptForPassword("Enter Password to Open");
+            if (password == null) return; // User cancelled
+
             try {
-                String content = FileHandler.readFile(file);
+                String content = FileHandler.readFile(file, password);
                 textArea.setText(content);
                 currentFile = file;
                 setModified(false);
                 updateTitle();
             } catch (Exception ex) {
                 JOptionPane.showMessageDialog(this, "Security Error while opening file:\n" + ex.getMessage(), "Access Denied", JOptionPane.ERROR_MESSAGE);
+            } finally {
+                // Goal 4: Discarded from memory after use
+                Arrays.fill(password, '0');
             }
         }
     }
@@ -173,13 +180,19 @@ public class EncNotepad extends JFrame {
             }
         }
 
+        char[] password = promptForPassword("Set Password for Encryption");
+        if (password == null) return; // User cancelled
+
         try {
-            FileHandler.writeFile(currentFile, textArea.getText());
+            FileHandler.writeFile(currentFile, textArea.getText(), password);
             setModified(false);
             updateTitle();
-            JOptionPane.showMessageDialog(this, "File securely saved successfully!", "Success", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "File securely encrypted and saved!", "Success", JOptionPane.INFORMATION_MESSAGE);
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "Error saving secure file: " + ex.getMessage(), "Fatal Encryption Error", JOptionPane.ERROR_MESSAGE);
+        } finally {
+            // Goal 4: Discarded from memory after use
+            Arrays.fill(password, '0');
         }
     }
 
@@ -224,6 +237,21 @@ public class EncNotepad extends JFrame {
         }
         
         setTitle(title);
+    }
+
+    private char[] promptForPassword(String title) {
+        JPanel panel = new JPanel(new BorderLayout(5, 5));
+        panel.add(new JLabel("Password:"), BorderLayout.WEST);
+        JPasswordField passwordField = new JPasswordField(20);
+        panel.add(passwordField, BorderLayout.CENTER);
+
+        int option = JOptionPane.showConfirmDialog(this, panel, title, 
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+
+        if (option == JOptionPane.OK_OPTION) {
+            return passwordField.getPassword();
+        }
+        return null;
     }
 
     public static void main(String[] args) {

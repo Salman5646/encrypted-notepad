@@ -51,7 +51,7 @@ public class FileHandler {
         return null;
     }
 
-    public static String readFile(File file) throws Exception {
+    public static String readFile(File file, char[] password) throws Exception {
         String content = new String(Files.readAllBytes(file.toPath()));
         
         // Detect if the file is encrypted
@@ -59,15 +59,15 @@ public class FileHandler {
         
         if (isEncrypted) {
             String dataToDecrypt = content.startsWith(ENC_HEADER) ? content.substring(ENC_HEADER.length()) : content;
-            return CipherUtil.decrypt(dataToDecrypt);
+            return CipherUtil.decrypt(dataToDecrypt, password);
         } else {
             return content;
         }
     }
 
-    public static void writeFile(File file, String content) throws Exception {
+    public static void writeFile(File file, String content, char[] password) throws Exception {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
-            String encryptedContent = CipherUtil.encrypt(content);
+            String encryptedContent = CipherUtil.encrypt(content, password);
             writer.write(ENC_HEADER + encryptedContent);
         }
     }

@@ -2,150 +2,145 @@ import javax.crypto.Cipher;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.DESKeySpec;
+import javax.crypto.spec.DESedeKeySpec;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Base64;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.StandardCharsets;
 
 /**
- * CipherUtil - handles the encryption/decryption logic using DES (CBC mode + IVs), and HMAC.
+ * CipherUtil - handles the encryption/decryption logic using Triple DES (DESede) in CBC mode,
+ * and HMAC-SHA256 for integrity. Keys are derived from a user password using SHA-256.
+ * Implements strict memory erasure (Goal 4) by using char[] and wiping buffers.
  */
 public class CipherUtil {
     
-    private static final String DEFAULT_KEY = "S3cr3tK3"; // 8 bytes for DES
-    private static final String DEFAULT_HMAC_KEY = "HmacAuthKey99"; // Key for HMAC authenticity
+    private static final String ALGORITHM = "DESede/CBC/PKCS5Padding";
+    private static final String DES_ALGORITHM = "DESede";
+    private static final String HMAC_ALGORITHM = "HmacSHA256";
     
     private static final SecureRandom secureRandom = new SecureRandom();
 
-    public static String encrypt(String text) throws Exception {
-        DESKeySpec keySpec = new DESKeySpec(DEFAULT_KEY.getBytes("UTF-8"));
-        SecretKeyFactory keyFactory = SecretKeyFactory.getInstance("DES");
-        SecretKey key = keyFactory.generateSecret(keySpec);
+    /**
+     * Derives a 24-byte Triple DES key and a 32-byte HMAC key from a password character array.
+     * Manually wipes all temporary buffers once keys are generated.
+     */
+    private static DerivedKeys deriveKeys(char[] password) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        
+        // Convert char[] to byte[] securely without creating a String
+        ByteBuffer bBuf = StandardCharsets.UTF_8.encode(CharBuffer.wrap(password));
+        byte[] passwordBytes = new byte[bBuf.remaining()];
+        bBuf.get(passwordBytes);
+        
+        // Perform the hash
+        byte[] hash = digest.digest(passwordBytes);
+        
+        // Immediately wipe the raw password byte array
+        Arrays.fill(passwordBytes, (byte) 0);
+        Arrays.fill(bBuf.array(), (byte) 0); // ByteBuffer.encode returns a buffer backed by a temp array
+        
+        // Extract 24 bytes for Triple DES
+        byte[] desKeyBytes = new byte[24];
+        System.arraycopy(hash, 0, desKeyBytes, 0, 24);
+        
+        // Prepare keys
+        SecretKeySpec hmacKey = new SecretKeySpec(hash, HMAC_ALGORITHM);
+        DESedeKeySpec keySpec = new DESedeKeySpec(desKeyBytes);
+        SecretKeyFactory keyFactory = SecretKeyFactory.getInstance(DES_ALGORITHM);
+        SecretKey desKey = keyFactory.generateSecret(keySpec);
+        
+        // Wipe local key material arrays now that JCE has the SecretKey objects
+        Arrays.fill(desKeyBytes, (byte) 0);
+        Arrays.fill(hash, (byte) 0);
+        
+        return new DerivedKeys(desKey, hmacKey);
+    }
 
-        // Generate an incredibly secure, unpredictable 8-byte IV
+    public static String encrypt(String text, char[] password) throws Exception {
+        DerivedKeys keys = deriveKeys(password);
+
         byte[] ivBytes = new byte[8];
         secureRandom.nextBytes(ivBytes);
         IvParameterSpec ivSpec = new IvParameterSpec(ivBytes);
 
-        // We upgrade from ECB to CBC mode now to utilize the IV
-        Cipher cipher = Cipher.getInstance("DES/CBC/PKCS5Padding");
-        cipher.init(Cipher.ENCRYPT_MODE, key, ivSpec);
+        Cipher cipher = Cipher.getInstance(ALGORITHM);
+        cipher.init(Cipher.ENCRYPT_MODE, keys.encryptionKey, ivSpec);
         
-        byte[] encryptedBytes = cipher.doFinal(text.getBytes("UTF-8"));
+        byte[] textBytes = text.getBytes(StandardCharsets.UTF_8);
+        byte[] encryptedBytes = cipher.doFinal(textBytes);
+        
+        // Wipe plain text bytes immediately
+        Arrays.fill(textBytes, (byte) 0);
+
         String encryptedBase64 = Base64.getEncoder().encodeToString(encryptedBytes);
         String ivBase64 = Base64.getEncoder().encodeToString(ivBytes);
         
-        // Calculate HMAC on both the IV and the Ciphertext so neither can be tampered with!
         String payloadToMac = ivBase64 + "::" + encryptedBase64;
-        String mac = getHmacSHA256(payloadToMac);
+        String mac = calculateHmac(payloadToMac, keys.hmacKey);
         
         return payloadToMac + "::" + mac;
     }
 
-    public static String decrypt(String text) throws Exception {
-        // Strip any hidden newlines or spaces added by text editors/OS that break exact string matching
+    public static String decrypt(String text, char[] password) throws Exception {
         String cleanText = text.trim();
         String[] parts = cleanText.split("::");
         
-        if (parts.length == 3) {
-            // NEW MODE: IV + CBC Encryption + HMAC
-            String ivBase64 = parts[0];
-            String dataToDecrypt = parts[1];
-            String expectedMac = parts[2].trim(); // trim the seal itself just to be completely safe
-            
-            String payloadToMac = ivBase64 + "::" + dataToDecrypt;
-            if (!expectedMac.equals(getHmacSHA256(payloadToMac))) {
-                throw new Exception("HMAC AUTHENTICITY FAILED: Forgery detected!");
-            }
-            
-            DESKeySpec keySpec = new DESKeySpec(DEFAULT_KEY.getBytes("UTF-8"));
-            SecretKey key = SecretKeyFactory.getInstance("DES").generateSecret(keySpec);
-            
-            Cipher cipher = Cipher.getInstance("DES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(Base64.getDecoder().decode(ivBase64)));
-            
-            byte[] decodedBytes = Base64.getDecoder().decode(dataToDecrypt);
-            return new String(cipher.doFinal(decodedBytes), "UTF-8");
-            
-        } else {
-            // LEGACY MODE FALLBACK (ECB without IV) for older saved files
-            String dataToDecrypt = parts[0];
-            String expectedMac = parts.length > 1 ? parts[1].trim() : null;
-
-            boolean hmacMatched = false;
-            if (expectedMac != null) {
-                if (expectedMac.equals(getHmacSHA256(dataToDecrypt))) {
-                    hmacMatched = true;
-                }
-            }
-
-            DESKeySpec keySpec = new DESKeySpec(DEFAULT_KEY.getBytes("UTF-8"));
-            SecretKey key = SecretKeyFactory.getInstance("DES").generateSecret(keySpec);
-
-            Cipher cipher = Cipher.getInstance("DES/ECB/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, key);
-            
-            byte[] decodedBytes = Base64.getDecoder().decode(dataToDecrypt);
-            String decryptedText = new String(cipher.doFinal(decodedBytes), "UTF-8");
-
-            // Check absolute legacy (Plain SHA-256)
-            if (expectedMac != null && !hmacMatched) {
-                if (!expectedMac.equals(getSHA256Hash(decryptedText))) {
-                    throw new Exception("AUTHENTICITY FAILED: Forgery detected!");
-                }
-            }
-            return decryptedText;
+        if (parts.length != 3) {
+            throw new Exception("INVALID FILE FORMAT: The file appears to be corrupted or incompatible.");
         }
+
+        DerivedKeys keys = deriveKeys(password);
+        
+        String ivBase64 = parts[0];
+        String dataToDecrypt = parts[1];
+        String expectedMac = parts[2].trim();
+        
+        String payloadToMac = ivBase64 + "::" + dataToDecrypt;
+        if (!expectedMac.equals(calculateHmac(payloadToMac, keys.hmacKey))) {
+            throw new Exception("AUTHENTICATION FAILED: Incorrect password or file tampering detected.");
+        }
+        
+        Cipher cipher = Cipher.getInstance(ALGORITHM);
+        cipher.init(Cipher.DECRYPT_MODE, keys.encryptionKey, new IvParameterSpec(Base64.getDecoder().decode(ivBase64)));
+        
+        byte[] decodedBytes = Base64.getDecoder().decode(dataToDecrypt);
+        byte[] originalBytes = cipher.doFinal(decodedBytes);
+        
+        String result = new String(originalBytes, StandardCharsets.UTF_8);
+        
+        // Wipe sensitive binary plaintext
+        Arrays.fill(originalBytes, (byte) 0);
+        
+        return result;
     }
 
-    /**
-     * Generates an HMAC-SHA256 cryptographic authentication code for the given text.
-     */
-    public static String getHmacSHA256(String text) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            SecretKeySpec secretKeySpec = new SecretKeySpec(DEFAULT_HMAC_KEY.getBytes("UTF-8"), "HmacSHA256");
-            mac.init(secretKeySpec);
-            byte[] hmacBytes = mac.doFinal(text.getBytes("UTF-8"));
-            
-            StringBuilder hexString = new StringBuilder(2 * hmacBytes.length);
-            for (byte b : hmacBytes) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) {
-                    hexString.append('0');
-                }
-                hexString.append(hex);
-            }
-            return hexString.toString();
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+    private static String calculateHmac(String data, SecretKey hmacKey) throws Exception {
+        Mac mac = Mac.getInstance(HMAC_ALGORITHM);
+        mac.init(hmacKey);
+        byte[] hmacBytes = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+        
+        StringBuilder hexString = new StringBuilder(2 * hmacBytes.length);
+        for (byte b : hmacBytes) {
+            String hex = Integer.toHexString(0xff & b);
+            if (hex.length() == 1) hexString.append('0');
+            hexString.append(hex);
         }
+        return hexString.toString();
     }
 
-    /**
-     * Generates a one-way SHA-256 hash of the given text (retained for backward compatibility/utilities).
-     */
-    public static String getSHA256Hash(String text) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] encodedhash = digest.digest(text.getBytes("UTF-8"));
-            
-            // Convert the binary hash into a readable hexadecimal string
-            StringBuilder hexString = new StringBuilder(2 * encodedhash.length);
-            for (byte b : encodedhash) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) {
-                    hexString.append('0');
-                }
-                hexString.append(hex);
-            }
-            return hexString.toString();
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+    private static class DerivedKeys {
+        final SecretKey encryptionKey;
+        final SecretKey hmacKey;
+
+        DerivedKeys(SecretKey encryptionKey, SecretKey hmacKey) {
+            this.encryptionKey = encryptionKey;
+            this.hmacKey = hmacKey;
         }
     }
 }
